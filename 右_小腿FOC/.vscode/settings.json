@@ -1,0 +1,12 @@
+{
+    "files.associations": {
+        "random": "cpp",
+        "cmath": "cpp",
+        "system_error": "cpp",
+        "array": "cpp",
+        "functional": "cpp",
+        "tuple": "cpp",
+        "type_traits": "cpp",
+        "utility": "cpp"
+    }
+}
