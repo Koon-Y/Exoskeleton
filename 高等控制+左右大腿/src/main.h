@@ -13,8 +13,8 @@
 #define GPIO_USART_AF      (GPIO_AF7)
 
 // --- 感測器參數 ---
-#define SENSOR_BOARD_ID_L    0x101
-#define SENSOR_BOARD_ID_R    0x102
+#define SENSOR_BOARD_ID_L    0x101 //左大腿
+#define SENSOR_BOARD_ID_R    0x102 //右大腿
 #define EMG_THRESHOLD      800  // 肌肉發力觸發門檻 (0~4095)，請依實際情況微調
 
 // --- 全域變數宣告 (告訴編譯器這些變數存在於 main.c) ---

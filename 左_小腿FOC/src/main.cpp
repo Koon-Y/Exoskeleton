@@ -1,3 +1,6 @@
+/*
+左腿小腿外骨骼FOC
+*/
 #include <SimpleFOC.h>
 #include <Arduino.h>
 #include "STM32_CAN.h"
@@ -190,7 +193,7 @@ void setup() {
 
 //跳過對齊
   motor.sensor_direction = Direction::CW;
-  motor.zero_electric_angle = 3.83;
+  motor.zero_electric_angle = 2.89;
 
   motor.init();
   motor.initFOC();
@@ -201,25 +204,33 @@ void setup() {
   Serial.println("開機原點已設定！");
   Serial.println(angle_offset);
 
-  Serial.print("All ready, IS FREE MODE");
+  Serial.print("左小腿 All ready, IS FREE MODE");
   _delay(1000);
 }
 
 void loop() {
+  static uint32_t last_can_rx_time = millis(); // 斷電計時
 
   motor.loopFOC();
   // canbus
   if (Can.read(CAN_RX_msg) ) {
-    // 【關鍵修改】只抓取 ID 為 0x102 (小臂) 的數據
-    if (CAN_RX_msg.id == 0x102) {
+    // 【關鍵修改】只抓取 ID 為 0x103 (小臂) 的數據
+    if (CAN_RX_msg.id == 0x103) {
         // ==========================================
         // 【新增還原邏輯】把小臂的數值拼回 0~4095
         // ==========================================
         if (CAN_RX_msg.len >= 2) {
-            current_emg_val = (CAN_RX_msg.buf[0] << 8) | CAN_RX_msg.buf[1];
+          current_emg_val = (CAN_RX_msg.buf[0] << 8) | CAN_RX_msg.buf[1];
+          last_can_rx_time = millis();
         }
     } // 結束 if (id == 0x102)
   }
+
+  if (millis() - last_can_rx_time > 100) {
+      current_emg_val = 0; // 強制把肌肉訊號清零！
+      // 這樣接下來的 ASSIST 模式就會判定沒有發力，乖乖執行放下動作
+  }
+
   // static uint32_t print_timer = millis();
   // if (millis() - print_timer > 50) { // 50ms = 每秒印 20 次 (配合 Python 動畫剛好)
   //     print_timer = millis();
@@ -257,8 +268,8 @@ void loop() {
     // 1. 開關觸發邏輯 (Trigger Switch)
     // =====================================================
     float t_target = 0.0f;
-    uint16_t threshold = 800;  // 【觸發點】超過這個值才開始有動作 (可視底噪調低，越低越靈敏)
-    uint16_t max_emg = 3000;   // 【滿力點】EMG 達到這個值時，給予 100% 最大推力
+    uint16_t threshold = 3500;  // 【觸發點】超過這個值才開始有動作 (可視底噪調低，越低越靈敏)
+    uint16_t max_emg = 4300;   // 【滿力點】EMG 達到這個值時，給予 100% 最大推力
     float drop_force = 0.5f;   // 克服靜摩擦的主動下放力道 (正向)
     if (current_emg_val > threshold) {
         // 計算發力比例 (0.0 ~ 1.0)

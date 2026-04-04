@@ -1,3 +1,7 @@
+/*
+右腿小腿外骨骼FOC
+*/
+
 #include <SimpleFOC.h>
 #include <Arduino.h>
 #include "STM32_CAN.h"
@@ -206,20 +210,27 @@ void setup() {
 }
 
 void loop() {
-  motor.loopFOC();
+  static uint32_t last_can_rx_time = millis(); // 斷電計時
 
+  motor.loopFOC();
+  
   // canbus
   if (Can.read(CAN_RX_msg) ) {
     // 【關鍵修改】只抓取 ID 為 0x102 (小臂) 的數據
-    if (CAN_RX_msg.id == 0x102) {
+    if (CAN_RX_msg.id == 0x104) {
         // ==========================================
         // 【新增還原邏輯】把小臂的數值拼回 0~4095
         // ==========================================
         if (CAN_RX_msg.len >= 2) { 
-            current_emg_val = (CAN_RX_msg.buf[0] << 8) | CAN_RX_msg.buf[1];
+          current_emg_val = (CAN_RX_msg.buf[0] << 8) | CAN_RX_msg.buf[1];
+          last_can_rx_time = millis();
         }
     } // 結束 if (id == 0x102)
-    
+  }
+
+  if (millis() - last_can_rx_time > 100) {
+      current_emg_val = 0; // 強制把肌肉訊號清零！
+      // 這樣接下來的 ASSIST 模式就會判定沒有發力，乖乖執行放下動作
   }
 
   // static uint32_t print_timer = millis();
@@ -262,8 +273,8 @@ void loop() {
     // 1. 開關觸發邏輯 (Trigger Switch)
     // =====================================================
     float t_target = 0.0f;
-    uint16_t threshold = 800;  // 【觸發點】
-    uint16_t max_emg = 3000;   // 【滿力點】
+    uint16_t threshold = 3500;  // 【觸發點】
+    uint16_t max_emg = 4500;   // 【滿力點】
 
     float bend_force = 0.5f;   // 休息時往上收的力道
 

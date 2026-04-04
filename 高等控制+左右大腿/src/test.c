@@ -31,6 +31,13 @@ volatile uint32_t system_millis = 0;
 volatile uint16_t g_emg_L_leg = 0;
 volatile uint16_t g_emg_R_leg = 0;
 
+// 紀錄最後一次收到封包的時間
+volatile uint32_t last_emg_L_time = 0;
+volatile uint32_t last_emg_R_time = 0;
+
+// 定義超時時間 (例如 100 毫秒沒收到資料就視為斷線)
+#define EMG_TIMEOUT_MS 100
+
 // --- IMU 專用全域變數 ---
 volatile uint32_t g_imu_packet_count = 0; // 偵錯用：成功接收的封包總數
 volatile uint8_t g_last_func_word = 0;    // 偵錯用：最後一次收到的功能字
@@ -44,9 +51,9 @@ float current_cmd_p = 0.0f;
 float final_target_p = 1.0f; 
 float step_size = 0.002f;   
 
-#define EMG_THRESHOLD  1300   // 門檻值：低於此數值視為肌肉放鬆 (需根據你的靜息狀態校正)
-#define EMG_MAX_SIGNAL 1500  // 最大值：你全力收縮時的數值 (需根據實測修改)
-#define MAX_ASSIST_TORQUE 3.0f // 肌肉最大輸出時給予的額外助力 (Nm)
+#define EMG_THRESHOLD  450 // 門檻值：低於此數值視為肌肉放鬆 (需根據你的靜息狀態校正)
+#define EMG_MAX_SIGNAL 600  // 最大值：你全力收縮時的數值 (需根據實測修改)
+#define MAX_ASSIST_TORQUE 2.0f // 肌肉最大輸出時給予的額外助力 (Nm)
 
 // ==========================================
 // 硬體中斷與底層函式
@@ -70,15 +77,17 @@ void can1_rx0_isr(void) {
         if (rx_id == SENSOR_BOARD_ID_L) {
             // 直接將 MyoWare 的 ENV 數值存入全域變數
             g_emg_L_leg = (rx_data[0] << 8) | rx_data[1];
+            last_emg_L_time = system_millis; // 🌟 收到資料，更新左腿最後存活時間
         }else if (rx_id == SENSOR_BOARD_ID_R)
         {
             g_emg_R_leg = (rx_data[0] << 8) | rx_data[1];
+            last_emg_R_time = system_millis; // 🌟 收到資料，更新右腿最後存活時間
         }
         
     }
 }
 
-// USART3 接收中斷 (專門伺候 IMU)
+// USART3 接收中斷 (專門伺候 IMU) 右腿
 void usart3_isr(void) {
     static uint8_t rx_buf[64];
     static uint8_t rx_idx = 0;
@@ -88,85 +97,6 @@ void usart3_isr(void) {
         ((USART_SR(USART3) & USART_SR_RXNE) != 0)) {
         
         uint8_t data = usart_recv(USART3);
-
-        if (rx_idx == 0) {
-            if (data == 0x7E) { rx_buf[0] = data; rx_idx = 1; }
-        } else if (rx_idx == 1) {
-            if (data == 0x23) { rx_buf[1] = data; rx_idx = 2; }
-            else if (data == 0x7E) { rx_buf[0] = data; rx_idx = 1; }
-            else { rx_idx = 0; }
-        } else if (rx_idx == 2) {
-            expected_len = data;
-            rx_buf[2] = data;
-            if (expected_len < 5 || expected_len >= 64) { rx_idx = 0; }
-            else { rx_idx = 3; }
-        } else {
-            rx_buf[rx_idx++] = data;
-            
-            if (rx_idx >= expected_len) {
-                // 計算 Checksum
-                uint8_t sum = 0;
-                for (int i = 0; i < expected_len - 1; i++) {
-                    sum += rx_buf[i];
-                }
-
-                if (sum == rx_buf[expected_len - 1]) { 
-                    g_imu_packet_count++; // 只要進來，代表校驗成功，通訊沒問題！
-                    
-                    uint8_t func_word = rx_buf[3];
-                    g_last_func_word = func_word; 
-                    
-                    // ==========================================
-                    // 情況 A：IMU 發送的是 0x04 (加速度原始數據)
-                    // ==========================================
-                    if (func_word == 0x04) { 
-                        int16_t accel_x_raw = (int16_t)((rx_buf[5] << 8) | rx_buf[4]);
-                        int16_t accel_y_raw = (int16_t)((rx_buf[7] << 8) | rx_buf[6]);
-                        int16_t accel_z_raw = (int16_t)((rx_buf[9] << 8) | rx_buf[8]);
-
-                        float accel_x = (float)accel_x_raw * (16.0f / 32767.0f);
-                        float accel_y = (float)accel_y_raw * (16.0f / 32767.0f);
-                        float accel_z = (float)accel_z_raw * (16.0f / 32767.0f);
-
-                        L_imu_pitch_rad = atan2f(-accel_x, sqrtf(accel_y * accel_y + accel_z * accel_z));
-                        L_imu_pitch_deg = L_imu_pitch_rad * (180.0f / 3.14159f);
-                    }
-                    
-                    // ==========================================
-                    // 情況 B：IMU 發送的是 0x26 (歐拉角 - 直接提供浮點數弧度)
-                    // ==========================================
-                    else if (func_word == 0x26) {
-                        // 根據協議：Pitch 佔 4 個 byte，從 P_1 到 P_4 (也就是 byte 8 到 byte 11)
-                        uint32_t pitch_raw = ((uint32_t)rx_buf[11] << 24) |
-                                             ((uint32_t)rx_buf[10] << 16) |
-                                             ((uint32_t)rx_buf[9]  << 8) |
-                                             ((uint32_t)rx_buf[8]);
-                        
-                        // 將 IEEE754 記憶體區塊轉換為 float
-                        float pitch_float;
-                        *((uint32_t*)&pitch_float) = pitch_raw;
-                        
-                        // 協議指出這組資料直接就是弧度 (Radian)
-                        L_imu_pitch_rad = pitch_float; 
-                        L_imu_pitch_deg = pitch_float * (180.0f / 3.14159f);
-                    }
-                }
-                rx_idx = 0; // 準備收下一包
-            }
-        }
-    }
-}
-
-// USART3 接收中斷 (專門伺候 IMU)
-void usart1_isr(void) {
-    static uint8_t rx_buf[64];
-    static uint8_t rx_idx = 0;
-    static uint8_t expected_len = 0;
-
-    if (((USART_CR1(USART1) & USART_CR1_RXNEIE) != 0) &&
-        ((USART_SR(USART1) & USART_SR_RXNE) != 0)) {
-        
-        uint8_t data = usart_recv(USART1);
 
         if (rx_idx == 0) {
             if (data == 0x7E) { rx_buf[0] = data; rx_idx = 1; }
@@ -228,6 +158,85 @@ void usart1_isr(void) {
                         // 協議指出這組資料直接就是弧度 (Radian)
                         R_imu_pitch_rad = pitch_float; 
                         R_imu_pitch_deg = pitch_float * (180.0f / 3.14159f);
+                    }
+                }
+                rx_idx = 0; // 準備收下一包
+            }
+        }
+    }
+}
+
+// USART1 接收中斷 (專門伺候 IMU) 左腿
+void usart1_isr(void) {
+    static uint8_t rx_buf[64];
+    static uint8_t rx_idx = 0;
+    static uint8_t expected_len = 0;
+
+    if (((USART_CR1(USART1) & USART_CR1_RXNEIE) != 0) &&
+        ((USART_SR(USART1) & USART_SR_RXNE) != 0)) {
+        
+        uint8_t data = usart_recv(USART1);
+
+        if (rx_idx == 0) {
+            if (data == 0x7E) { rx_buf[0] = data; rx_idx = 1; }
+        } else if (rx_idx == 1) {
+            if (data == 0x23) { rx_buf[1] = data; rx_idx = 2; }
+            else if (data == 0x7E) { rx_buf[0] = data; rx_idx = 1; }
+            else { rx_idx = 0; }
+        } else if (rx_idx == 2) {
+            expected_len = data;
+            rx_buf[2] = data;
+            if (expected_len < 5 || expected_len >= 64) { rx_idx = 0; }
+            else { rx_idx = 3; }
+        } else {
+            rx_buf[rx_idx++] = data;
+            
+            if (rx_idx >= expected_len) {
+                // 計算 Checksum
+                uint8_t sum = 0;
+                for (int i = 0; i < expected_len - 1; i++) {
+                    sum += rx_buf[i];
+                }
+
+                if (sum == rx_buf[expected_len - 1]) { 
+                    g_imu_packet_count++; // 只要進來，代表校驗成功，通訊沒問題！
+                    
+                    uint8_t func_word = rx_buf[3];
+                    g_last_func_word = func_word; 
+                    
+                    // ==========================================
+                    // 情況 A：IMU 發送的是 0x04 (加速度原始數據)
+                    // ==========================================
+                    if (func_word == 0x04) { 
+                        int16_t accel_x_raw = (int16_t)((rx_buf[5] << 8) | rx_buf[4]);
+                        int16_t accel_y_raw = (int16_t)((rx_buf[7] << 8) | rx_buf[6]);
+                        int16_t accel_z_raw = (int16_t)((rx_buf[9] << 8) | rx_buf[8]);
+
+                        float accel_x = (float)accel_x_raw * (16.0f / 32767.0f);
+                        float accel_y = (float)accel_y_raw * (16.0f / 32767.0f);
+                        float accel_z = (float)accel_z_raw * (16.0f / 32767.0f);
+
+                        L_imu_pitch_rad = atan2f(-accel_x, sqrtf(accel_y * accel_y + accel_z * accel_z));
+                        L_imu_pitch_deg = L_imu_pitch_rad * (180.0f / 3.14159f);
+                    }
+                    
+                    // ==========================================
+                    // 情況 B：IMU 發送的是 0x26 (歐拉角 - 直接提供浮點數弧度)
+                    // ==========================================
+                    else if (func_word == 0x26) {
+                        // 根據協議：Pitch 佔 4 個 byte，從 P_1 到 P_4 (也就是 byte 8 到 byte 11)
+                        uint32_t pitch_raw = ((uint32_t)rx_buf[11] << 24) |
+                                             ((uint32_t)rx_buf[10] << 16) |
+                                             ((uint32_t)rx_buf[9]  << 8) |
+                                             ((uint32_t)rx_buf[8]);
+                        
+                        // 將 IEEE754 記憶體區塊轉換為 float
+                        float pitch_float;
+                        *((uint32_t*)&pitch_float) = pitch_raw;
+                        
+                        // 協議指出這組資料直接就是弧度 (Radian)
+                        L_imu_pitch_rad = pitch_float; 
+                        L_imu_pitch_deg = pitch_float * (180.0f / 3.14159f);
                     }
                 }
                 rx_idx = 0; // 準備收下一包
@@ -318,8 +327,8 @@ void usart_setup(void) {
     usart_enable(USART2);
 }
 
-void imu_usart3_setup(void) {
-    // 1. 啟用時鐘
+void imu_usart3_setup(void) { // 左腿X
+    // 1. 啟用時鐘 // 右腿
     rcc_periph_clock_enable(RCC_GPIOC);
     rcc_periph_clock_enable(RCC_USART3);
 
@@ -343,8 +352,8 @@ void imu_usart3_setup(void) {
     usart_enable(USART3);
 }
 
-void imu_usart1_setup(void) {
-    // 1. 啟用時鐘
+void imu_usart1_setup(void) { // 右腿X
+    // 1. 啟用時鐘  //左腿
     rcc_periph_clock_enable(RCC_GPIOA);
     rcc_periph_clock_enable(RCC_USART1);
 
@@ -421,6 +430,14 @@ int main(void) {
     bool was_pushing_last_time = false; 
 
     while (1) {
+        //斷電中斷
+        if (system_millis - last_emg_L_time > EMG_TIMEOUT_MS) {
+        g_emg_L_leg = 0; // 超過 100ms 沒收到封包，強制數值歸零 (放鬆)
+        }
+        if (system_millis - last_emg_R_time > EMG_TIMEOUT_MS) {
+            g_emg_R_leg = 0; // 強制歸零
+        }
+
         // --- 靜態變數：燙平左右腿 IMU 的跳動雜訊 ---
         static float filtered_L_pitch_rad = 0.0f;
         static float filtered_R_pitch_rad = 0.0f;
@@ -435,8 +452,8 @@ int main(void) {
         float L_gravity_ff = 0.65f * sinf(filtered_L_pitch_rad); // 左腿重力補償
         float L_assist_torque = 0.0f;
 
-        if (g_emg_L_leg > EMG_THRESHOLD && g_emg_R_leg < EMG_THRESHOLD ) {
-            float ratio = (float)(g_emg_L_leg - EMG_THRESHOLD) / (EMG_MAX_SIGNAL - EMG_THRESHOLD);
+        if (g_emg_L_leg > g_emg_R_leg && g_emg_L_leg > 330) {
+            float ratio = (float)(g_emg_L_leg - 330) / (550 - 330);
             if (ratio > 1.0f) ratio = 1.0f;
             L_assist_torque = ratio * MAX_ASSIST_TORQUE;
 
@@ -457,7 +474,7 @@ int main(void) {
         float R_gravity_ff = 0.65f * sinf(filtered_R_pitch_rad); // 右腿重力補償
         float R_assist_torque = 0.0f;
 
-        if (g_emg_R_leg > EMG_THRESHOLD && g_emg_L_leg < EMG_THRESHOLD ) {
+        if (g_emg_R_leg >= g_emg_L_leg && g_emg_R_leg > EMG_THRESHOLD) {
             float ratio = (float)(g_emg_R_leg - EMG_THRESHOLD) / (EMG_MAX_SIGNAL - EMG_THRESHOLD);
             if (ratio > 1.0f) ratio = 1.0f;
             R_assist_torque = ratio * MAX_ASSIST_TORQUE;

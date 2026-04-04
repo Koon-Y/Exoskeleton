@@ -129,7 +129,8 @@ int main(void) {
         payload_v1[1] = (uint8_t)(v1 & 0xFF); // V1 低 8 位
         // 使用 id_v1 發送，長度設為 8 (或設為 2 也可以)
         can_transmit(CAN1, id_v1, false, false, 2, payload_v1);
-        
+        delay(2000); // 【新增】等待硬體清空信箱
+
         // ==========================================
         // 2. 打包並發送 V2 (右大腿ch2)
         // ==========================================
@@ -139,6 +140,7 @@ int main(void) {
         
         // 使用 id_v2 發送
         can_transmit(CAN1, id_v2, false, false, 2, payload_v2);
+        delay(2000); // 【新增】等待硬體清空信箱
 
         // ==========================================
         // 2. 打包並發送 V3 (左小腿ch3)
@@ -149,6 +151,7 @@ int main(void) {
         
         // 使用 id_v2 發送
         can_transmit(CAN1, id_v3, false, false, 2, payload_v3);
+        delay(2000); // 【新增】等待硬體清空信箱
 
         // ==========================================
         // 2. 打包並發送 V4 (右小腿ch4)
@@ -159,6 +162,7 @@ int main(void) {
         
         // 使用 id_v2 發送
         can_transmit(CAN1, id_v4, false, false, 2, payload_v4);
+        delay(2000); // 【新增】等待硬體清空信箱
 
         // ==========================================
         // 3. 透過 USART 顯示發送狀態
