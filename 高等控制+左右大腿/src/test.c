@@ -7,6 +7,7 @@
 #include <libopencm3/stm32/usart.h>
 #include <libopencm3/cm3/nvic.h>
 #include <libopencm3/cm3/systick.h>
+#include <libopencm3/stm32/adc.h>
 #include <math.h>
 #include "main.h" // 修正為雙引號，代表本地標頭檔
 
@@ -30,6 +31,8 @@
 volatile uint32_t system_millis = 0;
 volatile uint16_t g_emg_L_leg = 0;
 volatile uint16_t g_emg_R_leg = 0;
+volatile uint16_t g_emg_L_calf = 0;
+volatile uint16_t g_emg_R_calf = 0;
 
 // 紀錄最後一次收到封包的時間
 volatile uint32_t last_emg_L_time = 0;
@@ -64,28 +67,28 @@ void sys_tick_handler(void) {
 }
 
 // CAN1 接收中斷 (極速版，無數位濾波)
-void can1_rx0_isr(void) {
-    uint32_t rx_id;
-    bool rx_ext, rx_rtr;
-    uint8_t rx_fmi, rx_len;
-    uint8_t rx_data[8];
-    uint16_t rx_timestamp;
+// void can1_rx0_isr(void) {
+//     uint32_t rx_id;
+//     bool rx_ext, rx_rtr;
+//     uint8_t rx_fmi, rx_len;
+//     uint8_t rx_data[8];
+//     uint16_t rx_timestamp;
 
-    while ((CAN_RF0R(CAN1) & CAN_RF0R_FMP0_MASK) != 0) {
-        can_receive(CAN1, 0, true, &rx_id, &rx_ext, &rx_rtr, &rx_fmi, &rx_len, rx_data, &rx_timestamp);
+//     while ((CAN_RF0R(CAN1) & CAN_RF0R_FMP0_MASK) != 0) {
+//         can_receive(CAN1, 0, true, &rx_id, &rx_ext, &rx_rtr, &rx_fmi, &rx_len, rx_data, &rx_timestamp);
 
-        if (rx_id == SENSOR_BOARD_ID_L) {
-            // 直接將 MyoWare 的 ENV 數值存入全域變數
-            g_emg_L_leg = (rx_data[0] << 8) | rx_data[1];
-            last_emg_L_time = system_millis; // 🌟 收到資料，更新左腿最後存活時間
-        }else if (rx_id == SENSOR_BOARD_ID_R)
-        {
-            g_emg_R_leg = (rx_data[0] << 8) | rx_data[1];
-            last_emg_R_time = system_millis; // 🌟 收到資料，更新右腿最後存活時間
-        }
+//         if (rx_id == SENSOR_BOARD_ID_L) {
+//             // 直接將 MyoWare 的 ENV 數值存入全域變數
+//             g_emg_L_leg = (rx_data[0] << 8) | rx_data[1];
+//             last_emg_L_time = system_millis; // 🌟 收到資料，更新左腿最後存活時間
+//         }else if (rx_id == SENSOR_BOARD_ID_R)
+//         {
+//             g_emg_R_leg = (rx_data[0] << 8) | rx_data[1];
+//             last_emg_R_time = system_millis; // 🌟 收到資料，更新右腿最後存活時間
+//         }
         
-    }
-}
+//     }
+// }
 
 // USART3 接收中斷 (專門伺候 IMU) 右腿
 void usart3_isr(void) {
@@ -327,6 +330,37 @@ void usart_setup(void) {
     usart_enable(USART2);
 }
 
+void adc_setup(void) {
+    rcc_periph_clock_enable(RCC_ADC1);
+    rcc_periph_clock_enable(RCC_GPIOA);
+    rcc_periph_clock_enable(RCC_GPIOB);
+    rcc_periph_clock_enable(RCC_GPIOC);
+
+    // 設定 A1(PA1), A2(PA4), A3(PB0), A4(PC1) 為類比輸入
+    gpio_mode_setup(GPIOA, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, GPIO1 | GPIO4);
+    gpio_mode_setup(GPIOB, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, GPIO0);
+    gpio_mode_setup(GPIOC, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, GPIO1);
+
+    adc_power_off(ADC1);
+    adc_disable_scan_mode(ADC1);
+    adc_set_single_conversion_mode(ADC1);
+    adc_disable_external_trigger_regular(ADC1);
+    adc_set_right_aligned(ADC1);
+    adc_set_sample_time_on_all_channels(ADC1, ADC_SMPR_SMP_28CYC);
+    adc_power_on(ADC1);
+
+    for (int i = 0; i < 800000; i++) __asm__("nop"); // 等待 ADC 穩定
+}
+
+uint16_t read_adc(uint8_t channel) {
+    uint8_t channel_array[16];
+    channel_array[0] = channel;
+    adc_set_regular_sequence(ADC1, 1, channel_array);
+    adc_start_conversion_regular(ADC1);
+    while (!adc_get_flag(ADC1, ADC_SR_EOC)); // 等待轉換完成
+    return adc_read_regular(ADC1);
+}
+
 void imu_usart3_setup(void) { // 左腿X
     // 1. 啟用時鐘 // 右腿
     rcc_periph_clock_enable(RCC_GPIOC);
@@ -391,14 +425,14 @@ void canbus_setup(void) {
     can_reset(CAN1);
     can_reset(CAN2);
 
-    can_init(CAN1, false, true, false, false, false, false, CAN_BTR_SJW_1TQ, CAN_BTR_TS1_6TQ, CAN_BTR_TS2_7TQ, 3, false, false);
+    can_init(CAN1, false, true, false, false, false, false, CAN_BTR_SJW_1TQ, CAN_BTR_TS1_6TQ, CAN_BTR_TS2_7TQ, 24, false, false);
     can_init(CAN2, false, true, false, false, false, false, CAN_BTR_SJW_1TQ, CAN_BTR_TS1_11TQ, CAN_BTR_TS2_2TQ, 3, false, false);
     
     can_filter_id_mask_32bit_init( 0, 0, 0, 0, true); 
     can_filter_id_mask_32bit_init(14, 0, 0, 1, true); 
 
-    can_enable_irq(CAN1, CAN_IER_FMPIE0);
-    nvic_enable_irq(NVIC_CAN1_RX0_IRQ);
+    // can_enable_irq(CAN1, CAN_IER_FMPIE0);
+    // nvic_enable_irq(NVIC_CAN1_RX0_IRQ);
 }
 
 void button_setup(void) {
@@ -420,8 +454,9 @@ int main(void) {
     // button_setup(); 
     imu_usart3_setup();
     imu_usart1_setup();
+    adc_setup();
 
-    // 🌟 原廠說明書認證：全新馬達預設 ID 就是 104 (0x68) [cite: 202, 203, 1317]
+    // 馬達 ID 104 、105
     uint8_t my_motor_id_L = 0x69; 
     uint8_t my_motor_id_R = 0x68; 
 
@@ -430,13 +465,33 @@ int main(void) {
     bool was_pushing_last_time = false; 
 
     while (1) {
-        //斷電中斷
-        if (system_millis - last_emg_L_time > EMG_TIMEOUT_MS) {
-        g_emg_L_leg = 0; // 超過 100ms 沒收到封包，強制數值歸零 (放鬆)
-        }
-        if (system_millis - last_emg_R_time > EMG_TIMEOUT_MS) {
-            g_emg_R_leg = 0; // 強制歸零
-        }
+        // //斷電中斷
+        // if (system_millis - last_emg_L_time > EMG_TIMEOUT_MS) {
+        // g_emg_L_leg = 0; // 超過 100ms 沒收到封包，強制數值歸零 (放鬆)
+        // }
+        // if (system_millis - last_emg_R_time > EMG_TIMEOUT_MS) {
+        //     g_emg_R_leg = 0; // 強制歸零
+        // }
+        // ==========================================
+        // 🌟 1. 本地讀取 4 顆 MyoWare (避開 A0，使用 A1~A4)
+        // ==========================================
+        g_emg_L_leg  = read_adc(1);  // PA1 (A1): 左大腿
+        g_emg_R_leg  = read_adc(4);  // PA4 (A2): 右大腿
+        g_emg_L_calf = read_adc(8);  // PB0 (A3): 左小腿
+        g_emg_R_calf = read_adc(11); // PC1 (A4): 右小腿
+
+
+        // ==========================================
+        // 🌟 2. 將資料透過 CAN1 發送出去 (供電腦或紀錄器存檔)
+        // ==========================================
+        uint8_t emg_tx_Ldata[2];
+        uint8_t emg_tx_Rdata[2];
+        emg_tx_Ldata[0] = g_emg_L_calf >> 8; emg_tx_Ldata[1] = g_emg_L_calf & 0xFF;
+        emg_tx_Rdata[0] = g_emg_R_calf >> 8; emg_tx_Rdata[1] = g_emg_R_calf & 0xFF;
+
+        // 假設我們用 0x300 當作這塊主板廣播 EMG 資料的 ID
+        can_transmit(CAN1, 0x103, false, false, 2, emg_tx_Ldata);
+        can_transmit(CAN1, 0x104, false, false, 2, emg_tx_Rdata);
 
         // --- 靜態變數：燙平左右腿 IMU 的跳動雜訊 ---
         static float filtered_L_pitch_rad = 0.0f;
@@ -498,7 +553,7 @@ int main(void) {
             // 格式：[L: EMG數值, 助力] | [R: EMG數值, 助力]
             usart_send_string("[L:"); usart_send_decimal(g_emg_L_leg);
             usart_send_string(","); usart_send_decimal((uint32_t)(L_assist_torque*10));
-
+            usart_send_string(", L_calf:"); usart_send_decimal(g_emg_L_calf);
             // 顯示左腿 Des (濾波後的目標角度)
             usart_send_string(", L_Des:"); 
             int l_des_deg = (int)(filtered_L_pitch_rad * 57.29578f); // 弧度轉度
@@ -507,6 +562,7 @@ int main(void) {
 
             usart_send_string("] | [R:"); usart_send_decimal(g_emg_R_leg);
             usart_send_string(","); usart_send_decimal((uint32_t)(R_assist_torque*10));
+            usart_send_string(", R_calf:"); usart_send_decimal(g_emg_R_calf);
 
             // 顯示右腿 Des (濾波後的目標角度)
             usart_send_string(", R_Des:"); 

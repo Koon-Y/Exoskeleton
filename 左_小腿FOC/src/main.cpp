@@ -25,6 +25,11 @@
 #define M_PWM (PC1)
 #define M_OC (PB1)  // DRV8302 過流保護腳位
 #define OC_ADJ (PB2)  // DRV8302 過流保護調整腳位
+#define VPDD_O_PIN (A3)
+
+//電池電壓讀取
+float current_batt_voltage = 24.0f; // 預設值
+bool is_batt_low = false;
 
 // CanBus setup
 STM32_CAN Can( CAN1, DEF );  //Use PA11/12 pins for CAN1.
@@ -43,7 +48,7 @@ float i_term = 0.0f;
 
 // ===== 助力參數 =====
 float assist_gain   = 0.5f;   // 助力增益 [V / (rad/s)]，越大越有力
-float assist_limit  = 3.0f;   // 助力上限 [V]，整體力量天花板
+float assist_limit  = 4.0f;   // 助力上限 [V]，整體力量天花板
 float vel_deadband  = 0.20f;  // |速度| < 0.20 rad/s 視為靜止→不出力
 float damping_gain  = 0.08f;  // 黏性阻尼，抑制暴衝/抖動
 float ramp_rate     = 5.0f;   // 力矩變化上限 [V/s]，讓力道平順
@@ -65,6 +70,15 @@ LowsideCurrentSense current_sense = LowsideCurrentSense(0.005f, 12.22f, PA0, PA1
 
 Commander commander = Commander(Serial);
 void onMotor(char* cmd){commander.motor(&motor, cmd);}
+
+// ===== 電池電壓讀取函數 =====
+float read_battery_voltage() {
+    // 讀取 ADC 值 (setup 中已設定為 12-bit 4095 解析度)
+    float pin_voltage = (analogRead(VPDD_O_PIN) / 1023.0) * 3.3;
+    // 乘上板子內建的分壓比例，還原成真實電池電壓
+    float real_voltage = pin_voltage * 14.333f;
+    return real_voltage;
+}
 
 void drv8302Setup(void)
 {
@@ -122,7 +136,7 @@ void onMode(char* c)
 void setup() {
   Serial.begin(115200);
 
-  Can.setBaudRate(1000000);  //1000KBPS
+  Can.setBaudRate(125000);  //1000KBPS
   Can.setMode(STM32_CAN::NORMAL); 
   Can.begin();
   
@@ -142,7 +156,23 @@ void setup() {
   drv8302Setup();
 
   driver.pwm_frequency = 20000;
-  driver.voltage_power_supply = 15;
+  current_batt_voltage = read_battery_voltage();
+  driver.voltage_power_supply = current_batt_voltage; 
+  Serial.print("Left calf controll,Initial Battery Voltage: ");
+  Serial.println(current_batt_voltage);
+  if (current_batt_voltage < 16.0f) {  
+      is_batt_low = true;
+      Serial.println("==================================");
+      Serial.println("[FATAL ERROR] Battery Voltage is LOW!");
+      Serial.println("System Halted. Please replace the battery.");
+      Serial.println("==================================");
+      
+      // 進入死迴圈！程式會永遠卡在這裡，絕對不會往下執行馬達初始化
+      while(1) {
+          // 可以讓板子上的 LED 閃爍，或單純等待
+          delay(1000);
+      }
+  }
   driver.init();
   motor.linkDriver(&driver);
 
@@ -247,11 +277,13 @@ void loop() {
   tx = constrain(tx, -0.6f, 0.6f);
   motor.move(tx);
   static uint32_t print_timer = millis();
-  if (millis() - print_timer > 50) { // 50ms = 每秒印 20 次 (配合 Python 動畫剛好)
+  if (millis() - print_timer > 100) { // 50ms = 每秒印 20 次 (配合 Python 動畫剛好)
       print_timer = millis();
       // 只要印最核心的資訊就好
       Serial.print("angle:");
       Serial.println(current_angle);
+      // Serial.print("EMG:");
+      // Serial.println(current_emg_val);
   }
   commander.run();
   return;
@@ -268,8 +300,8 @@ void loop() {
     // 1. 開關觸發邏輯 (Trigger Switch)
     // =====================================================
     float t_target = 0.0f;
-    uint16_t threshold = 3500;  // 【觸發點】超過這個值才開始有動作 (可視底噪調低，越低越靈敏)
-    uint16_t max_emg = 4300;   // 【滿力點】EMG 達到這個值時，給予 100% 最大推力
+    uint16_t threshold = 1200;  // 【觸發點】超過這個值才開始有動作 (可視底噪調低，越低越靈敏)
+    uint16_t max_emg = 1800;   // 【滿力點】EMG 達到這個值時，給予 100% 最大推力
     float drop_force = 0.5f;   // 克服靜摩擦的主動下放力道 (正向)
     if (current_emg_val > threshold) {
         // 計算發力比例 (0.0 ~ 1.0)
